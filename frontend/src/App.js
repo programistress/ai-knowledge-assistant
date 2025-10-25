@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import './App.css';
-import DataUploadPanel from './DataUploadPanel';
-import ChatPanel from './ChatPanel';
+import DataUploadPanel from './components/DataUploadPanel';
+import ChatPanel from './components/ChatPanel';
 
 function App() {
   const [entries, setEntries] = useState([]);

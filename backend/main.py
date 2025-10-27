@@ -1,6 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 import os
+from openai import OpenAI
 
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 
@@ -80,3 +81,42 @@ def query_pinecone(index, query_text, top_k=5):
     )
     
     return results['matches']
+
+
+def generate_response(query, context_chunks):
+    chunks_text = []
+    for match in context_chunks:
+        content = match['metadata']['content']
+        chunks_text.append(content)
+    
+    # combine chunks with separator
+    context = "\n\n---\n\n".join(chunks_text)
+    
+    # limit context length (GPT-4o-mini has 128k context, but keep it reasonable)
+    max_context_length = 8000
+    if len(context) > max_context_length:
+        context = context[:max_context_length] + "...[truncated]"
+    
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that answers questions based on the provided context. If the answer is not in the context, say so."
+                },
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+                }
+            ],
+            temperature=0.2,
+            max_tokens=500  # response length
+        )
+        
+        return response.choices[0].message.content
+    
+    except Exception as e:
+        return f"Error generating response: {str(e)}"

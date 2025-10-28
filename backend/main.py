@@ -4,6 +4,14 @@ import os
 from openai import OpenAI
 
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        print("Loading embedding model (first time only)...")
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedding_model
 
 def init_pinecone(api_key, index_name="knowledge-base"):
     pc = Pinecone(api_key=api_key)
@@ -33,7 +41,7 @@ def chunk_text(text, chunk_size=1000, overlap=200):
     return chunks
 
 def embed_text(chunks):
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = get_embedding_model()  # Use cached model
     chunk_embeddings = model.encode(chunks, show_progress_bar=True)
     return chunk_embeddings
 
@@ -71,7 +79,7 @@ def store_chunks_in_pinecone(index, text, document_id, document_name=""):
     return len(vectors_to_upsert)
 
 def query_pinecone(index, query_text, top_k=5):
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = get_embedding_model()
     query_embedding = model.encode([query_text])[0]
     
     results = index.query(
@@ -82,6 +90,36 @@ def query_pinecone(index, query_text, top_k=5):
     
     return results['matches']
 
+# query with a dummy vector to get some results, then extract unique documents
+# this is a workaround since Pinecone doesn't have a "list all" feature
+def get_all_documents(index):
+    stats = index.describe_index_stats()
+    total_vectors = stats.get('total_vector_count', 0)
+    
+    if total_vectors == 0:
+        return []
+
+    dummy_query = [0.0] * 384
+    results = index.query(
+        vector=dummy_query,
+        top_k=min(1000, total_vectors),  #get up to 1000 vectors
+        include_metadata=True
+    )
+    
+    # extract unique documents by document_id
+    documents_dict = {}
+    for match in results.get('matches', []):
+        metadata = match.get('metadata', {})
+        doc_id = metadata.get('document_id')
+        doc_name = metadata.get('document_name', 'Unknown')
+        
+        if doc_id and doc_id not in documents_dict:
+            documents_dict[doc_id] = {
+                "document_id": doc_id,
+                "document_name": doc_name,
+            }
+    
+    return list(documents_dict.values())
 
 def generate_response(query, context_chunks):
     chunks_text = []

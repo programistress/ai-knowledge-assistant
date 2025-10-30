@@ -53,6 +53,13 @@ export async function getDocuments() {
   });
 }
 
+// delete a document by its ID
+export async function deleteDocument(documentId) {
+  return apiRequest(`/documents/${documentId}`, {
+    method: 'DELETE',
+  });
+}
+
 // check if the backend is running
 export async function checkHealth() {
   return apiRequest('/health', {

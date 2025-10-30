@@ -121,6 +121,14 @@ def get_all_documents(index):
     
     return list(documents_dict.values())
 
+def delete_document(index, document_id):
+    try:
+        index.delete(filter={"document_id": {"$eq": document_id}})
+        return True
+    except Exception as e:
+        print(f"Error deleting document {document_id}: {str(e)}")
+        return False
+
 def generate_response(query, context_chunks):
     chunks_text = []
     for match in context_chunks:

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { extractTextFromDocument, isAllowedFileFormat } from '../utils/documentExtractor';
+import { deleteDocument, uploadDocument } from '../utils/api';
 
 function DataUploadPanel({ entries, setEntries }) {
   const [showEntryForm, setShowEntryForm] = useState(false);
@@ -7,20 +8,32 @@ function DataUploadPanel({ entries, setEntries }) {
   const [entryText, setEntryText] = useState('');
   const [uploading, setUploading] = useState(false);
 
-  const handleSubmitEntry = () => {
-    if (entryTitle.trim() && entryText.trim()) {
-      setEntries([...entries, {
-        id: Date.now(),
-        type: 'text',
-        title: entryTitle,
-        content: entryText,
-        timestamp: new Date().toLocaleString()
-      }]);
-      setEntryTitle('');
-      setEntryText('');
-      setShowEntryForm(false);
+  const handleSubmitEntry = async () => {
+    if (entryTitle.trim() && entryText.trim() && !uploading) {
+      setUploading(true);
+      try {
+        // Upload text note to backend
+        const documentId = `note_${Date.now()}`;
+        await uploadDocument(documentId, entryTitle, entryText);
+
+        setEntries([...entries, {
+          id: documentId,
+          title: entryTitle,
+        }]);
+        
+        setEntryTitle('');
+        setEntryText('');
+        setShowEntryForm(false);
+        console.log('Note saved successfully!');
+      } catch (error) {
+        console.error('Error saving note:', error);
+        alert('Failed to save note: ' + error.message);
+      } finally {
+        setUploading(false);
+      }
     }
   };
+
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -30,7 +43,7 @@ function DataUploadPanel({ entries, setEntries }) {
 
     if (!isAllowedFileFormat(file, allowedFormats)) {
       alert('Please upload only PDF or DOC/DOCX files');
-      e.target.value = ''; // Reset file input
+      e.target.value = ''; // reset file input
       return;
     }
 
@@ -38,42 +51,45 @@ function DataUploadPanel({ entries, setEntries }) {
 
     try {
       const extractedText = await extractTextFromDocument(file);
-
       console.log('Extracted text:', extractedText);
 
-      // Add the entry with extracted text
+       // upload to backend
+      const documentId = `doc_${Date.now()}`;
+      await uploadDocument(documentId, file.name, extractedText);
+
       setEntries([...entries, {
-        id: Date.now(),
-        type: 'file',
+        id: documentId,
         title: file.name,
-        content: extractedText,
-        timestamp: new Date().toLocaleString()
       }]);
 
-      alert('Document uploaded and text extracted successfully!');
+      console.log('Document uploaded and text extracted successfully!');
     } catch (error) {
       console.error('Error processing file:', error);
-      alert('Failed to extract text from document: ' + error.message);
+      console.log('Failed to process file:' + error.message);
     } finally {
       setUploading(false);
       e.target.value = ''; // Reset file input
     }
   };
 
-  const handleDeleteEntry = (id) => {
+  const handleDeleteEntry = async (id) => {
+  try {
+    await deleteDocument(id);
     setEntries(entries.filter(entry => entry.id !== id));
-  };
+  } catch (error) {
+    console.error('Failed to delete document:', error);
+    alert('Failed to delete document');
+  }
+};
 
   return (
     <div className="left-panel">
+      <div className="panel-header">My Knowledge Base</div>
       <div className="entry-section">
         <button 
           className="new-entry-btn"
           onClick={() => setShowEntryForm(!showEntryForm)}
         >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M10 4V16M4 10H16" stroke="currentColor" strokeWidth="2" strokeLinecap="square"/>
-          </svg>
           New Entry
         </button>
 
@@ -85,19 +101,32 @@ function DataUploadPanel({ entries, setEntries }) {
               onChange={(e) => setEntryTitle(e.target.value)}
               placeholder="Enter note title..."
               className="entry-title-input"
+              disabled={uploading}
             />
             <textarea
               value={entryText}
               onChange={(e) => setEntryText(e.target.value)}
               placeholder="Type your entry here..."
               className="entry-textarea"
+              disabled={uploading}
             />
             <div className="form-actions">
-              <button onClick={handleSubmitEntry} className="submit-btn">
-                Submit
+              <button 
+                onClick={handleSubmitEntry} 
+                className="submit-btn"
+                disabled={uploading}
+              >
+                {uploading ? (
+                  <>
+                    <span className="spinner"></span>
+                    Uploading...
+                  </>
+                ) : (
+                  'Submit'
+                )}
               </button>
-              <label className={`upload-btn ${uploading ? 'uploading' : ''}`}>
-                {uploading ? 'Uploading...' : 'Upload Document'}
+              <label className={`upload-btn ${uploading ? 'uploading' : ''}`}> 
+              Upload Document
                 <input 
                   type="file" 
                   accept=".pdf,.doc,.docx"
@@ -111,26 +140,28 @@ function DataUploadPanel({ entries, setEntries }) {
         )}
       </div>
 
-      {entries.length > 0 && (
+      {entries.length > 0 ? (
         <div className="entries-list">
           {entries.map(entry => (
             <div key={entry.id} className="entry-item">
               <div className="entry-header">
-                <div className="entry-type">{entry.type === 'file' ? 'Document' : 'Note'}</div>
+                <div className="entry-type">Entry</div>
                 <button 
                   className="delete-btn"
                   onClick={() => handleDeleteEntry(entry.id)}
                   title="Delete"
                 >
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                  </svg>
+                  ×
                 </button>
               </div>
               <div className="entry-content">{entry.title}</div>
-              <div className="entry-timestamp">{entry.timestamp}</div>
             </div>
           ))}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <div className="empty-text">No entries yet!</div>
+          <div className="empty-subtext">Click "New Entry" above to get started.</div>
         </div>
       )}
     </div>

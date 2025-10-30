@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
+import { askQuestion } from '../utils/api';
 
 function ChatPanel({ chatMessages, setChatMessages }) {
   const [chatInput, setChatInput] = useState('');
+  const [loading, setLoading] = useState(false);
   const chatMessagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -12,8 +14,8 @@ function ChatPanel({ chatMessages, setChatMessages }) {
     scrollToBottom();
   }, [chatMessages]);
 
-  const handleSendMessage = () => {
-    if (chatInput.trim()) {
+  const handleSendMessage = async () => {
+    if (chatInput.trim() && !loading) {
       const userMessage = {
         id: Date.now(),
         content: chatInput,
@@ -22,18 +24,33 @@ function ChatPanel({ chatMessages, setChatMessages }) {
       };
       
       setChatMessages([...chatMessages, userMessage]);
+      const question = chatInput;
       setChatInput('');
+      setLoading(true);
 
-      // Simulate bot response
-      setTimeout(() => {
+      try {
+        // Call real API
+        const result = await askQuestion(question);
+        
         const botResponse = {
           id: Date.now() + 1,
-          content: 'I\'ve processed your query. Based on your knowledge base, I can help you find relevant information from your stored notes and documents. What specific information are you looking for?',
+          content: result.answer,
           sender: 'bot',
           timestamp: new Date().toLocaleString()
         };
         setChatMessages(prev => [...prev, botResponse]);
-      }, 800);
+      } catch (error) {
+        console.error('Error asking question:', error);
+        const errorResponse = {
+          id: Date.now() + 1,
+          content: 'Oopsie! Something went wrong. Please make sure you have uploaded documents first, then try again.',
+          sender: 'bot',
+          timestamp: new Date().toLocaleString()
+        };
+        setChatMessages(prev => [...prev, errorResponse]);
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
@@ -57,9 +74,10 @@ function ChatPanel({ chatMessages, setChatMessages }) {
           onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
           placeholder="Type a message..."
           className="chat-input"
+          disabled={loading}
         />
-        <button onClick={handleSendMessage} className="send-btn">
-          Send
+        <button onClick={handleSendMessage} className="send-btn" disabled={loading}>
+          {loading ? 'Thinking...' : 'Send'}
         </button>
       </div>
     </div>

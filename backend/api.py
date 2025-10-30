@@ -11,7 +11,8 @@ from main import (
     store_chunks_in_pinecone,
     query_pinecone,
     generate_response,
-    get_all_documents
+    get_all_documents,
+    delete_document
 )
 
 # pydantic models
@@ -185,5 +186,34 @@ async def get_documents():
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving documents: {str(e)}"
+        )
+
+# delete a document
+@app.delete("/documents/{document_id}")
+async def delete_document_endpoint(document_id: str):
+    if pinecone_index is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Pinecone not initialized"
+        )
+    
+    try:
+        success = delete_document(pinecone_index, document_id)
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Document {document_id} deleted successfully"
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete document"
+            )
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting document: {str(e)}"
         )
 

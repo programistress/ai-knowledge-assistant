@@ -41,4 +41,3 @@ export const isAllowedFileFormat = (file, allowedFormats = ['pdf', 'doc', 'docx'
   const fileExtension = file.name.split('.').pop().toLowerCase();
   return allowedFormats.includes(fileExtension);
 };
-

@@ -217,3 +217,96 @@ async def delete_document_endpoint(document_id: str):
             detail=f"Error deleting document: {str(e)}"
         )
 
+@app.post("/initialize-dataset")
+async def initialize_dataset():
+    if pinecone_index is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Pinecone not initialized"
+        )
+    
+    try:
+        import os
+        import glob
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # Get dataset directory (one level up from backend folder)
+        dataset_dir = os.path.join(os.path.dirname(__file__), '..', 'dataset')
+        dataset_dir = os.path.abspath(dataset_dir)
+        
+        if not os.path.exists(dataset_dir):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Dataset directory not found: {dataset_dir}"
+            )
+        
+        # Find all markdown files except README
+        md_files = glob.glob(os.path.join(dataset_dir, '*.md'))
+        md_files = [f for f in md_files if not f.endswith('README.md')]
+        md_files.sort()  # Sort for consistent ordering
+        
+        def process_file(filepath):
+            """Process a single file and return its info"""
+            # Read file content
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Extract title from first line (assuming it starts with #)
+            lines = content.split('\n')
+            title_line = next((line for line in lines if line.strip().startswith('#')), None)
+            if title_line:
+                title = title_line.replace('#', '').strip()
+            else:
+                title = os.path.basename(filepath).replace('.md', '')
+            
+            # Generate document ID from filename
+            doc_id = os.path.basename(filepath).replace('.md', '')
+            
+            # Upload to Pinecone
+            num_chunks = store_chunks_in_pinecone(
+                index=pinecone_index,
+                text=content,
+                document_id=doc_id,
+                document_name=title
+            )
+            
+            return {
+                "id": doc_id,
+                "title": title,
+                "chunks": num_chunks
+            }
+        
+        # Optimized: Process files in parallel using ThreadPoolExecutor
+        uploaded_docs = []
+        total_chunks = 0
+        
+        # Use 4 workers for parallel processing (adjust based on your CPU)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_file = {executor.submit(process_file, filepath): filepath for filepath in md_files}
+            
+            for future in as_completed(future_to_file):
+                try:
+                    result = future.result()
+                    uploaded_docs.append(result)
+                    total_chunks += result["chunks"]
+                except Exception as e:
+                    filepath = future_to_file[future]
+                    print(f"Error processing {filepath}: {str(e)}")
+        
+        # Sort results by id for consistent ordering
+        uploaded_docs.sort(key=lambda x: x["id"])
+        
+        return {
+            "success": True,
+            "message": "Dataset initialized successfully",
+            "documents_uploaded": len(uploaded_docs),
+            "total_chunks": total_chunks,
+            "documents": uploaded_docs
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error initializing dataset: {str(e)}"
+        )
+

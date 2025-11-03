@@ -31,7 +31,7 @@ def init_pinecone(api_key, index_name="knowledge-base"):
     return pc.Index(index_name)
 
 # overlapping chunks with a fixed character count
-def chunk_text(text, chunk_size=1000, overlap=200):
+def chunk_text(text, chunk_size=2000, overlap=300):
     chunks = []
     start = 0
     while start < len(text):
@@ -42,7 +42,7 @@ def chunk_text(text, chunk_size=1000, overlap=200):
 
 def embed_text(chunks):
     model = get_embedding_model()  # Use cached model
-    chunk_embeddings = model.encode(chunks, show_progress_bar=True)
+    chunk_embeddings = model.encode(chunks, show_progress_bar=True, batch_size=64)
     return chunk_embeddings
 
 def store_chunks_in_pinecone(index, text, document_id, document_name=""):
@@ -78,9 +78,9 @@ def store_chunks_in_pinecone(index, text, document_id, document_name=""):
     
     return len(vectors_to_upsert)
 
-def query_pinecone(index, query_text, top_k=5):
+def query_pinecone(index, query_text, top_k=3):
     model = get_embedding_model()
-    query_embedding = model.encode([query_text])[0]
+    query_embedding = model.encode([query_text], show_progress_bar=False)[0]
     
     results = index.query(
         vector=query_embedding.tolist(),
@@ -138,8 +138,8 @@ def generate_response(query, context_chunks):
     # combine chunks with separator
     context = "\n\n---\n\n".join(chunks_text)
     
-    # limit context length (GPT-4o-mini has 128k context, but keep it reasonable)
-    max_context_length = 8000
+    # Optimized: Reduced context length for faster processing
+    max_context_length = 6000
     if len(context) > max_context_length:
         context = context[:max_context_length] + "...[truncated]"
     
@@ -151,15 +151,15 @@ def generate_response(query, context_chunks):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that answers questions based on the provided context. If the answer is not in the context, say so."
+                    "content": "You are a helpful DSA assistant. Provide clear, concise answers based on the context. Use markdown formatting for code examples."
                 },
                 {
                     "role": "user",
                     "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
                 }
             ],
-            temperature=0.2,
-            max_tokens=500  # response length
+            temperature=0.3,  # Slightly higher for faster generation
+            max_tokens=800  # Increased for better code examples
         )
         
         return response.choices[0].message.content

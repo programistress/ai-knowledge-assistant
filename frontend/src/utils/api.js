@@ -67,3 +67,10 @@ export async function checkHealth() {
   });
 }
 
+// initialize dataset - load all markdown files from backend's dataset folder
+export async function initializeDataset() {
+  return apiRequest('/initialize-dataset', {
+    method: 'POST',
+  });
+}
+

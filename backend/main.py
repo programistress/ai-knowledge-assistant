@@ -1,6 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 import os
+import time
 from openai import OpenAI
 
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -10,7 +11,14 @@ def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
         print("Loading embedding model (first time only)...")
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        try:
+            # Try loading from local cache first (faster, no network)
+            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
+            print("Loaded embedding model from local cache")
+        except Exception:
+            # Fall back to downloading if not cached
+            print("Model not in cache, downloading from HuggingFace...")
+            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
 
 def init_pinecone(api_key, index_name="knowledge-base"):
@@ -45,15 +53,51 @@ def embed_text(chunks):
     chunk_embeddings = model.encode(chunks, show_progress_bar=True, batch_size=64)
     return chunk_embeddings
 
-def store_chunks_in_pinecone(index, text, document_id, document_name=""):
-    chunks = chunk_text(text)
-    embeddings = embed_text(chunks)
+def store_chunks_in_pinecone(
+    index,
+    text,
+    document_id,
+    document_name="",
+    page_texts=None,
+    file_type=None,
+    source_url=None
+):
+    started_at = time.perf_counter()
+
+    chunking_started_at = time.perf_counter()
+    chunk_records = []
+
+    if page_texts:
+        for page_number, page_text in page_texts:
+            if not page_text or not page_text.strip():
+                continue
+
+            page_chunks = chunk_text(page_text)
+            for page_chunk in page_chunks:
+                chunk_records.append({
+                    "content": page_chunk,
+                    "page_number": page_number
+                })
+    else:
+        chunks = chunk_text(text)
+        chunk_records = [{"content": chunk, "page_number": None} for chunk in chunks]
+
+    chunking_duration = time.perf_counter() - chunking_started_at
+
+    if not chunk_records:
+        return 0
+
+    embedding_started_at = time.perf_counter()
+    chunk_texts = [record["content"] for record in chunk_records]
+    embeddings = embed_text(chunk_texts)
+    embedding_duration = time.perf_counter() - embedding_started_at
 
     vectors_to_upsert = [] 
 
     # list of tuples (index, (chunk, embedding))
     # (0, ("The cat sat", [0.2, 0.8, ...])),
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+    for i, (chunk_record, embedding) in enumerate(zip(chunk_records, embeddings)):
+        chunk = chunk_record["content"]
         vector_id = f"{document_id}_chunk_{i}"
         
         # Metadata stored alongside the vector
@@ -63,6 +107,15 @@ def store_chunks_in_pinecone(index, text, document_id, document_name=""):
             "chunk_index": i,
             "content": chunk  # store the full chunk text
         }
+
+        if chunk_record.get("page_number") is not None:
+            metadata["page_number"] = chunk_record["page_number"]
+
+        if file_type:
+            metadata["file_type"] = file_type
+
+        if source_url:
+            metadata["source_url"] = source_url
         
         vectors_to_upsert.append({
             "id": vector_id,
@@ -72,9 +125,18 @@ def store_chunks_in_pinecone(index, text, document_id, document_name=""):
     
     # upsert in batches (Pinecone recommends batch sizes of 100-200)
     batch_size = 100
+    upsert_started_at = time.perf_counter()
     for i in range(0, len(vectors_to_upsert), batch_size):
         batch = vectors_to_upsert[i:i + batch_size]
         index.upsert(vectors=batch)
+    upsert_duration = time.perf_counter() - upsert_started_at
+
+    total_duration = time.perf_counter() - started_at
+    print(
+        f"[store] document_id={document_id} chunks={len(chunk_records)} "
+        f"chunking={chunking_duration:.2f}s embedding={embedding_duration:.2f}s "
+        f"upsert={upsert_duration:.2f}s total={total_duration:.2f}s"
+    )
     
     return len(vectors_to_upsert)
 
@@ -132,8 +194,10 @@ def delete_document(index, document_id):
 def generate_response(query, context_chunks):
     chunks_text = []
     for match in context_chunks:
-        content = match['metadata']['content']
-        chunks_text.append(content)
+        metadata = match.get('metadata', {})
+        content = metadata.get('content', '')
+        document_name = metadata.get('document_name', 'Unknown')
+        chunks_text.append(f"[Source file: {document_name}]\n{content}")
     
     # combine chunks with separator
     context = "\n\n---\n\n".join(chunks_text)
@@ -151,7 +215,16 @@ def generate_response(query, context_chunks):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful DSA assistant. Provide clear, concise answers based on the context. Use markdown formatting for code examples."
+                    "content": (
+                        "You are a helpful DSA assistant. Use the provided context to answer the question.\n"
+                        "Style requirements:\n"
+                        "- Do not paste large chunks verbatim.\n"
+                        "- Synthesize and explain in your own words.\n"
+                        "- Be concise and practical.\n"
+                        "- Mention source file names when helpful.\n"
+                        "- If quoting, keep quotes very short (one sentence max).\n"
+                        "- Use markdown formatting."
+                    )
                 },
                 {
                     "role": "user",

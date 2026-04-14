@@ -17,6 +17,11 @@ function App() {
     }
   ]);
 
+  // Suggested questions state
+  const [suggestedQuestions, setSuggestedQuestions] = useState([]);
+  const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
+  const [lastDocumentInfo, setLastDocumentInfo] = useState(null);
+
   useEffect(() => {
     async function initializeApp() {
       try {
@@ -93,10 +98,17 @@ function App() {
         <DataUploadPanel 
           entries={entries} 
           setEntries={setEntries}
-          />
+          suggestedQuestions={suggestedQuestions}
+          setSuggestedQuestions={setSuggestedQuestions}
+          setIsGeneratingQuestions={setIsGeneratingQuestions}
+          setLastDocumentInfo={setLastDocumentInfo}
+        />
         <ChatPanel 
           chatMessages={chatMessages} 
-          setChatMessages={setChatMessages} 
+          setChatMessages={setChatMessages}
+          suggestedQuestions={suggestedQuestions}
+          isGeneratingQuestions={isGeneratingQuestions}
+          lastDocumentInfo={lastDocumentInfo}
         />
       </div>
     </div>

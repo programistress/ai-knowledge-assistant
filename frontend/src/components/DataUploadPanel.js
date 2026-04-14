@@ -1,12 +1,52 @@
 import { useState } from 'react';
-import { extractTextFromDocument, isAllowedFileFormat } from '../utils/documentExtractor';
-import { deleteDocument, uploadDocument } from '../utils/api';
+import { extractTextFromDoc, isAllowedFileFormat } from '../utils/documentExtractor';
+import { deleteDocument, uploadDocument, uploadPdfDocument, generateSuggestedQuestions } from '../utils/api';
 
-function DataUploadPanel({ entries, setEntries }) {
+function DataUploadPanel({ 
+  entries, 
+  setEntries, 
+  setSuggestedQuestions, 
+  setIsGeneratingQuestions, 
+  setLastDocumentInfo 
+}) {
+  const QUESTION_CONTEXT_MAX_CHARS = 3000;
   const [showEntryForm, setShowEntryForm] = useState(false);
   const [entryTitle, setEntryTitle] = useState('');
   const [entryText, setEntryText] = useState('');
   const [uploading, setUploading] = useState(false);
+
+  // Helper function to generate questions after successful upload
+  const generateQuestionsForDocument = async (documentId, documentName, content) => {
+    const startedAt = performance.now();
+    const excerpt = content.slice(0, QUESTION_CONTEXT_MAX_CHARS);
+    console.log(`[question-generation] started for "${documentName}" with ${excerpt.length} chars`);
+
+    try {
+      setIsGeneratingQuestions(true);
+      const apiStartedAt = performance.now();
+      const result = await generateSuggestedQuestions(documentId, documentName, excerpt);
+      const apiDuration = ((performance.now() - apiStartedAt) / 1000).toFixed(2);
+      console.log(`[question-generation] API call completed in ${apiDuration}s`);
+      
+      if (result.success && result.suggested_questions) {
+        setSuggestedQuestions(result.suggested_questions);
+        setLastDocumentInfo({
+          documentId: result.document_id,
+          documentName: result.document_name
+        });
+        console.log(`[question-generation] generated ${result.suggested_questions.length} questions`);
+      } else {
+        console.log('[question-generation] completed without suggested questions');
+      }
+    } catch (error) {
+      console.error('[question-generation] failed:', error);
+      // Don't show error to user as this is a nice-to-have feature
+    } finally {
+      setIsGeneratingQuestions(false);
+      const totalDuration = ((performance.now() - startedAt) / 1000).toFixed(2);
+      console.log(`[question-generation] finished in ${totalDuration}s`);
+    }
+  };
 
   const handleSubmitEntry = async () => {
     if (entryTitle.trim() && entryText.trim() && !uploading) {
@@ -20,6 +60,9 @@ function DataUploadPanel({ entries, setEntries }) {
           id: documentId,
           title: entryTitle,
         }]);
+        
+        // Generate suggested questions based on the uploaded note
+        await generateQuestionsForDocument(documentId, entryTitle, entryText);
         
         setEntryTitle('');
         setEntryText('');
@@ -38,6 +81,8 @@ function DataUploadPanel({ entries, setEntries }) {
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    const overallStartedAt = performance.now();
+    console.log(`[upload] started for "${file.name}" (${file.size} bytes)`);
 
     const allowedFormats = ['pdf', 'doc', 'docx'];
 
@@ -50,21 +95,39 @@ function DataUploadPanel({ entries, setEntries }) {
     setUploading(true);
 
     try {
-      const extractedText = await extractTextFromDocument(file);
-      console.log('Extracted text:', extractedText);
-
-       // upload to backend
       const documentId = `doc_${Date.now()}`;
-      await uploadDocument(documentId, file.name, extractedText);
+      const uploadStartedAt = performance.now();
+      const fileExtension = file.name.split('.').pop().toLowerCase();
+      let questionSourceText = '';
+
+      if (fileExtension === 'pdf') {
+        const uploadResult = await uploadPdfDocument(documentId, file.name, file);
+        questionSourceText = uploadResult.content || '';
+      } else {
+        const extractedText = await extractTextFromDoc(file);
+        await uploadDocument(documentId, file.name, extractedText);
+        questionSourceText = extractedText;
+      }
+
+      const uploadDuration = ((performance.now() - uploadStartedAt) / 1000).toFixed(2);
+      console.log(`[upload] backend upload/indexing completed in ${uploadDuration}s`);
 
       setEntries([...entries, {
         id: documentId,
         title: file.name,
       }]);
 
-      console.log('Document uploaded and text extracted successfully!');
+      // Generate suggested questions in background so upload flow is not blocked
+      if (questionSourceText) {
+        void generateQuestionsForDocument(documentId, file.name, questionSourceText);
+        console.log('[upload] background question generation started');
+      }
+
+      const totalDuration = ((performance.now() - overallStartedAt) / 1000).toFixed(2);
+      console.log(`[upload] completed in ${totalDuration}s`);
     } catch (error) {
-      console.error('Error processing file:', error);
+      const totalDuration = ((performance.now() - overallStartedAt) / 1000).toFixed(2);
+      console.error(`[upload] failed after ${totalDuration}s:`, error);
       console.log('Failed to process file:' + error.message);
     } finally {
       setUploading(false);

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fredoka:wght@400;500;600&display=swap');
 
 body {
   margin: 0;
@@ -6,9 +6,22 @@ body {
     'Ubuntu', 'Cantarell', 'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: #2a2220;
+  color: #e8dcd8;
+  letter-spacing: 0.01em;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+::selection {
+  background-color: rgba(212, 165, 165, 0.3);
+  color: #e8dcd8;
+}
+
+::-moz-selection {
+  background-color: rgba(212, 165, 165, 0.3);
+  color: #e8dcd8;
 }

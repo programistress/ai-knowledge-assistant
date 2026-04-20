@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { extractTextFromDoc, isAllowedFileFormat } from '../utils/documentExtractor';
-import { deleteDocument, uploadDocument, uploadPdfDocument, generateSuggestedQuestions } from '../utils/api';
+import { deleteDocument, uploadDocument, uploadPdfDocument, generateSuggestedQuestions, clearAllDocuments, initializeDataset, API_URL } from '../utils/api';
 
 function DataUploadPanel({ 
   entries, 
@@ -14,6 +14,8 @@ function DataUploadPanel({
   const [entryTitle, setEntryTitle] = useState('');
   const [entryText, setEntryText] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   // Helper function to generate questions after successful upload
   const generateQuestionsForDocument = async (documentId, documentName, content) => {
@@ -59,9 +61,10 @@ function DataUploadPanel({
         setEntries([...entries, {
           id: documentId,
           title: entryTitle,
+          type: 'note'
         }]);
         
-        // Generate suggested questions based on the uploaded note
+        // !! need to generate on mount as well
         await generateQuestionsForDocument(documentId, entryTitle, entryText);
         
         setEntryTitle('');
@@ -100,9 +103,13 @@ function DataUploadPanel({
       const fileExtension = file.name.split('.').pop().toLowerCase();
       let questionSourceText = '';
 
+      let pdfUrl = null;
+      
       if (fileExtension === 'pdf') {
         const uploadResult = await uploadPdfDocument(documentId, file.name, file);
+        // store text ftom result for generating questions
         questionSourceText = uploadResult.content || '';
+        pdfUrl = uploadResult.pdf_url || null;
       } else {
         const extractedText = await extractTextFromDoc(file);
         await uploadDocument(documentId, file.name, extractedText);
@@ -115,6 +122,8 @@ function DataUploadPanel({
       setEntries([...entries, {
         id: documentId,
         title: file.name,
+        pdfUrl: pdfUrl,
+        type: fileExtension === 'pdf' ? 'pdf' : 'doc'
       }]);
 
       // Generate suggested questions in background so upload flow is not blocked
@@ -128,22 +137,76 @@ function DataUploadPanel({
     } catch (error) {
       const totalDuration = ((performance.now() - overallStartedAt) / 1000).toFixed(2);
       console.error(`[upload] failed after ${totalDuration}s:`, error);
-      console.log('Failed to process file:' + error.message);
+      alert(error.message);
     } finally {
       setUploading(false);
-      e.target.value = ''; // Reset file input
+      e.target.value = ''; 
     }
   };
 
   const handleDeleteEntry = async (id) => {
-  try {
-    await deleteDocument(id);
-    setEntries(entries.filter(entry => entry.id !== id));
-  } catch (error) {
-    console.error('Failed to delete document:', error);
-    alert('Failed to delete document');
-  }
-};
+    try {
+      await deleteDocument(id);
+      setEntries(entries.filter(entry => entry.id !== id));
+    } catch (error) {
+      console.error('Failed to delete document:', error);
+      alert('Failed to delete document');
+    }
+  };
+
+  const handleEntryClick = (entry) => {
+    if (entry.pdfUrl) {
+      const fullUrl = `${API_URL}${entry.pdfUrl}`;
+      window.open(fullUrl, '_blank');
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!window.confirm('Are you sure you want to delete ALL documents?')) {
+      return;
+    }
+    
+    setClearing(true);
+    try {
+      await clearAllDocuments();
+      setEntries([]);
+      setSuggestedQuestions([]);
+    } catch (error) {
+      console.error('Failed to clear documents:', error);
+      alert('Failed to clear documents: ' + error.message);
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const handleResetDataset = async () => {
+    setResetting(true);
+    try {
+      // Clear existing documents first
+      await clearAllDocuments();
+      setEntries([]);
+      
+      // Re-initialize from dataset folder
+      const result = await initializeDataset();
+      
+      if (result.success && result.documents) {
+        const newEntries = result.documents.map(doc => ({
+          id: doc.id,
+          title: doc.title,
+          type: 'pdf',
+          pdfUrl: doc.pdf_url || null
+        }));
+        setEntries(newEntries);
+      }
+      
+      setSuggestedQuestions([]);
+    } catch (error) {
+      console.error('Failed to reset dataset:', error);
+      alert('Failed to reset dataset: ' + error.message);
+    } finally {
+      setResetting(false);
+    }
+  };
 
   return (
     <div className="left-panel">
@@ -206,12 +269,22 @@ function DataUploadPanel({
       {entries.length > 0 ? (
         <div className="entries-list">
           {entries.map(entry => (
-            <div key={entry.id} className="entry-item">
+            <div 
+              key={entry.id} 
+              className={`entry-item ${entry.pdfUrl ? 'clickable' : ''}`}
+              onClick={() => handleEntryClick(entry)}
+              title={entry.pdfUrl ? 'Click to open PDF' : ''}
+            >
               <div className="entry-header">
-                <div className="entry-type">Entry</div>
+                <div className="entry-type">
+                  {entry.type === 'pdf' ? 'PDF' : entry.type === 'doc' ? 'DOC' : 'Note'}
+                </div>
                 <button 
                   className="delete-btn"
-                  onClick={() => handleDeleteEntry(entry.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteEntry(entry.id);
+                  }}
                   title="Delete"
                 >
                   ×
@@ -227,6 +300,25 @@ function DataUploadPanel({
           <div className="empty-subtext">Click "New Entry" above to get started.</div>
         </div>
       )}
+
+      <div className="dataset-actions">
+        <button 
+          className="reset-btn"
+          onClick={handleResetDataset}
+          disabled={resetting || clearing}
+        >
+          {resetting ? 'Resetting...' : 'Reset Demo Dataset'}
+        </button>
+        {entries.length > 0 && (
+          <button 
+            className="clear-btn"
+            onClick={handleClearAll}
+            disabled={clearing || resetting}
+          >
+            {clearing ? 'Clearing...' : 'Clear All'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

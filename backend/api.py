@@ -18,11 +18,64 @@ from main import (
     store_chunks_in_pinecone,
     query_pinecone,
     generate_response,
-    get_all_documents,
-    delete_document,
+    delete_document as delete_from_pinecone,
     get_embedding_model
 )
+from document_store import (
+    register_document,
+    unregister_document,
+    get_all_documents as get_all_documents_from_store
+)
 from openai import OpenAI
+
+# for pdf access functionality !!!! need to change for deployment
+UPLOADS_DIR = Path(__file__).resolve().parent / "uploads"
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# fastapi initialization
+app = FastAPI(
+    title="ai knowledge assistant api",
+    description="upload documents and ask questions using RAG",
+    version="1.0.0"
+)
+# static file server for pdfs !!!! need to change for deployment
+app.mount("/files", StaticFiles(directory=str(UPLOADS_DIR)), name="files")
+
+# cors middleware to communicate with frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # React dev server
+        "http://127.0.0.1:3000"   # Alternative localhost
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],  
+)
+
+# deferred initialization pattern
+pinecone_index = None
+
+# startup event
+@app.on_event("startup")
+async def startup_event():
+    global pinecone_index
+    #pinecone
+    api_key = os.getenv("PINECONE_API_KEY")
+    print("Initializing Pinecone connection...")
+    pinecone_index = init_pinecone(api_key, index_name="knowledge-base")
+    print("Pinecone ready!")
+    #openai
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        print("openai key not found")
+    else:
+        print("openai API key found!")
+    # Pre-load embedding model at startup (uses local cache if available)
+    print("Pre-loading embedding model...")
+    get_embedding_model()
+    print("Embedding model ready!")
+
 
 COMMON_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in",
@@ -35,8 +88,41 @@ BOILERPLATE_TERMS = {
     "acknowledg", "dedication", "table of contents"
 }
 
-UPLOADS_DIR = Path(__file__).resolve().parent / "uploads"
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+def _is_knowledge_inquiry(text: str) -> bool:
+    """Check if the message is asking for information that would need document lookup."""
+    cleaned = text.lower().strip()
+    
+    # Question indicators
+    question_starters = ["what", "how", "why", "when", "where", "which", "who", 
+                         "explain", "describe", "tell me", "can you", "could you",
+                         "define", "show me", "give me", "list", "compare"]
+    
+    # Check for question patterns
+    if any(cleaned.startswith(q) for q in question_starters):
+        return True
+    if "?" in text:
+        return True
+    
+    # Check for specific topic inquiry (more than 3 meaningful words)
+    keywords = _extract_query_keywords(text)
+    if len(keywords) >= 2:
+        return True
+    
+    return False
+
+def _chat_response(message: str) -> str:
+    """Generate a simple chat response without document lookup."""
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a friendly knowledge assistant. Keep responses brief and natural."},
+            {"role": "user", "content": message}
+        ],
+        temperature=0.7,
+        max_tokens=150
+    )
+    return response.choices[0].message.content.strip()
 
 
 def _extract_query_keywords(question: str):
@@ -49,11 +135,25 @@ def _is_likely_boilerplate(text: str) -> bool:
     return any(term in lowered for term in BOILERPLATE_TERMS)
 
 
+def _clean_garbled_text(text: str) -> str:
+    """Remove garbled/non-printable characters from text."""
+    if not text:
+        return ""
+    # Keep only printable ASCII and common unicode, remove control chars and garbled sequences
+    cleaned = re.sub(r'[^\x20-\x7E\u00A0-\u00FF\u0100-\u017F\u0400-\u04FF\n]', '', text)
+    # Remove sequences of repeated special chars that indicate encoding issues
+    cleaned = re.sub(r'[�\ufffd]{2,}', '', cleaned)
+    # Collapse multiple spaces
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
 def _build_relevant_excerpt(content: str, question: str, max_chars: int = 220) -> str:
     if not content:
         return ""
 
-    clean_content = re.sub(r"\s+", " ", content).strip()
+    # Clean garbled text first
+    clean_content = _clean_garbled_text(content)
+    clean_content = re.sub(r"\s+", " ", clean_content).strip()
     if not clean_content:
         return ""
 
@@ -95,15 +195,35 @@ def _public_pdf_url(document_id: str) -> str:
     return f"/files/{document_id}.pdf"
 
 
+def _fix_pdf_spacing(text: str) -> str:
+    """Fix common PDF extraction spacing issues."""
+    import re
+    # Add space before uppercase letter that follows lowercase (camelCase -> camel Case)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Add space before uppercase letter that follows punctuation without space
+    text = re.sub(r'([.!?,;:])([A-Z])', r'\1 \2', text)
+    # Fix multiple spaces
+    text = re.sub(r' +', ' ', text)
+    return text
+
+
 def _extract_pdf_pages(file_path: Path):
     reader = PdfReader(str(file_path))
     page_texts = []
     full_text_parts = []
 
     for page_index, page in enumerate(reader.pages):
-        text = (page.extract_text() or "").strip()
+        # Try layout mode first for better spacing
+        try:
+            text = (page.extract_text(extraction_mode="layout") or "").strip()
+        except Exception:
+            text = (page.extract_text() or "").strip()
+        
         if not text:
             continue
+
+        # Fix spacing issues
+        text = _fix_pdf_spacing(text)
 
         page_number = page_index + 1
         page_texts.append((page_number, text))
@@ -126,47 +246,6 @@ class QueryRequest(BaseModel):
 
 
 
-# fastapi
-app = FastAPI(
-    title="ai knowledge assistant api",
-    description="upload documents and ask questions using RAG",
-    version="1.0.0"
-)
-app.mount("/files", StaticFiles(directory=str(UPLOADS_DIR)), name="files")
-
-# cors middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React dev server
-        "http://127.0.0.1:3000"   # Alternative localhost
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow GET, POST, etc.
-    allow_headers=["*"],  # Allow all headers
-)
-
-pinecone_index = None
-
-# startup event
-@app.on_event("startup")
-async def startup_event():
-    global pinecone_index
-    #pinecone
-    api_key = os.getenv("PINECONE_API_KEY")
-    print("Initializing Pinecone connection...")
-    pinecone_index = init_pinecone(api_key, index_name="knowledge-base")
-    print("Pinecone ready!")
-    #openai
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        print("openai key not found")
-    else:
-        print("openai API key found!")
-    # Pre-load embedding model at startup (uses local cache if available)
-    print("Pre-loading embedding model...")
-    get_embedding_model()
-    print("Embedding model ready!")
 
 @app.get("/")
 async def root():
@@ -208,6 +287,13 @@ async def upload_document(doc: DocumentUpload):
             document_name=doc.document_name
         )
 
+        register_document(
+            document_id=doc.document_id,
+            document_name=doc.document_name,
+            file_type="note",
+            num_chunks=num_chunks
+        )
+
         total_duration = time.perf_counter() - request_started_at
         print(
             f"[upload] finished document_id={doc.document_id} "
@@ -234,10 +320,13 @@ async def upload_pdf_document(
     document_name: str = Form(...),
     file: UploadFile = File(...)
 ):
+    print(f"[upload-pdf] received: document_id={document_id}, document_name={document_name}, filename={file.filename}, content_type={file.content_type}")
+    
     if pinecone_index is None:
         raise HTTPException(status_code=500, detail="Pinecone not initialized")
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
+        print(f"[upload-pdf] rejected: filename={file.filename}")
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     request_started_at = time.perf_counter()
@@ -249,7 +338,7 @@ async def upload_pdf_document(
 
         page_texts, full_text = _extract_pdf_pages(stored_file_path)
         if not full_text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+            raise HTTPException(status_code=400, detail="Sorry, we can't read text from your PDF :( It might be a scanned document or image-based. Try a different PDF with selectable text.")
 
         num_chunks = store_chunks_in_pinecone(
             index=pinecone_index,
@@ -259,6 +348,14 @@ async def upload_pdf_document(
             page_texts=page_texts,
             file_type="pdf",
             source_url=_public_pdf_url(document_id)
+        )
+
+        register_document(
+            document_id=document_id,
+            document_name=document_name,
+            file_type="pdf",
+            pdf_url=_public_pdf_url(document_id),
+            num_chunks=num_chunks
         )
 
         total_duration = time.perf_counter() - request_started_at
@@ -292,6 +389,18 @@ async def query_documents(request: QueryRequest):
             detail="Pinecone not initialized"
         )
     
+    # If not a knowledge inquiry, just chat normally
+    if not _is_knowledge_inquiry(request.question):
+        try:
+            answer = _chat_response(request.question)
+            return {
+                "success": True,
+                "answer": answer,
+                "sources": []
+            }
+        except Exception as e:
+            print(f"[query] chat response failed: {e}")
+    
     try:
         matches = query_pinecone(
             index=pinecone_index,
@@ -300,9 +409,14 @@ async def query_documents(request: QueryRequest):
         )
         
         if not matches:
+            # Fall back to normal chat if no docs found
+            try:
+                answer = _chat_response(request.question)
+            except:
+                answer = "I couldn't find any relevant information in your documents."
             return {
                 "success": True,
-                "answer": "I couldn't find any relevant information to answer your question.",
+                "answer": answer,
                 "sources": []
             }
         
@@ -335,6 +449,9 @@ async def query_documents(request: QueryRequest):
         }
     
     except Exception as e:
+        import traceback
+        print(f"[query] ERROR: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=500,
             detail=f"Error processing query: {str(e)}"
@@ -343,14 +460,8 @@ async def query_documents(request: QueryRequest):
 # get list of documents
 @app.get("/documents")
 async def get_documents():
-    if pinecone_index is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Pinecone not initialized"
-        )
-    
     try:
-        documents = get_all_documents(pinecone_index)
+        documents = get_all_documents_from_store()
         
         return {
             "success": True,
@@ -374,12 +485,14 @@ async def delete_document_endpoint(document_id: str):
         )
     
     try:
-        success = delete_document(pinecone_index, document_id)
+        pinecone_success = delete_from_pinecone(pinecone_index, document_id)
+        unregister_document(document_id)
+        
         pdf_path = _pdf_storage_path(document_id)
         if pdf_path.exists():
             pdf_path.unlink()
         
-        if success:
+        if pinecone_success:
             return {
                 "success": True,
                 "message": f"Document {document_id} deleted successfully"
@@ -395,6 +508,42 @@ async def delete_document_endpoint(document_id: str):
             status_code=500,
             detail=f"Error deleting document: {str(e)}"
         )
+
+
+@app.delete("/documents")
+async def clear_all_documents():
+    """Delete all documents from the knowledge base."""
+    if pinecone_index is None:
+        raise HTTPException(status_code=500, detail="Pinecone not initialized")
+    
+    try:
+        documents = get_all_documents_from_store()
+        deleted_count = 0
+        
+        for doc in documents:
+            doc_id = doc.get("document_id")
+            if doc_id:
+                delete_from_pinecone(pinecone_index, doc_id)
+                unregister_document(doc_id)
+                
+                pdf_path = _pdf_storage_path(doc_id)
+                if pdf_path.exists():
+                    pdf_path.unlink()
+                
+                deleted_count += 1
+        
+        return {
+            "success": True,
+            "message": f"Deleted {deleted_count} documents",
+            "deleted_count": deleted_count
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error clearing documents: {str(e)}"
+        )
+
 
 @app.post("/initialize-dataset")
 async def initialize_dataset():
@@ -422,15 +571,17 @@ async def initialize_dataset():
         # Find all markdown files except README
         md_files = glob.glob(os.path.join(dataset_dir, '*.md'))
         md_files = [f for f in md_files if not f.endswith('README.md')]
-        md_files.sort()  # Sort for consistent ordering
+        md_files.sort()
         
-        def process_file(filepath):
-            """Process a single file and return its info"""
-            # Read file content
+        # Find all PDF files
+        pdf_files = glob.glob(os.path.join(dataset_dir, '*.pdf'))
+        pdf_files.sort()
+        
+        def process_md_file(filepath):
+            """Process a markdown file and return its info"""
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Extract title from first line (assuming it starts with #)
             lines = content.split('\n')
             title_line = next((line for line in lines if line.strip().startswith('#')), None)
             if title_line:
@@ -438,10 +589,8 @@ async def initialize_dataset():
             else:
                 title = os.path.basename(filepath).replace('.md', '')
             
-            # Generate document ID from filename
             doc_id = os.path.basename(filepath).replace('.md', '')
             
-            # Upload to Pinecone
             num_chunks = store_chunks_in_pinecone(
                 index=pinecone_index,
                 text=content,
@@ -449,30 +598,86 @@ async def initialize_dataset():
                 document_name=title
             )
             
+            register_document(
+                document_id=doc_id,
+                document_name=title,
+                file_type="md",
+                num_chunks=num_chunks
+            )
+            
             return {
                 "id": doc_id,
                 "title": title,
-                "chunks": num_chunks
+                "chunks": num_chunks,
+                "type": "md"
             }
         
-        # Optimized: Process files in parallel using ThreadPoolExecutor
+        def process_pdf_file(filepath):
+            """Process a PDF file and return its info"""
+            filename = os.path.basename(filepath)
+            doc_id = f"demo_{filename.replace('.pdf', '').replace(' ', '_').lower()}"
+            
+            # Copy PDF to uploads folder so it can be served
+            dest_path = UPLOADS_DIR / f"{doc_id}.pdf"
+            shutil.copy2(filepath, dest_path)
+            
+            # Extract text from PDF
+            page_texts, full_text = _extract_pdf_pages(Path(filepath))
+            
+            if not full_text.strip():
+                print(f"[initialize-dataset] Skipping {filename} - no extractable text")
+                return None
+            
+            num_chunks = store_chunks_in_pinecone(
+                index=pinecone_index,
+                text=full_text,
+                document_id=doc_id,
+                document_name=filename,
+                page_texts=page_texts,
+                file_type="pdf",
+                source_url=_public_pdf_url(doc_id)
+            )
+            
+            register_document(
+                document_id=doc_id,
+                document_name=filename,
+                file_type="pdf",
+                pdf_url=_public_pdf_url(doc_id),
+                num_chunks=num_chunks
+            )
+            
+            return {
+                "id": doc_id,
+                "title": filename,
+                "chunks": num_chunks,
+                "type": "pdf",
+                "pdf_url": _public_pdf_url(doc_id)
+            }
+        
         uploaded_docs = []
         total_chunks = 0
         
-        # Use 4 workers for parallel processing (adjust based on your CPU)
+        # Process all files in parallel
+        all_tasks = []
         with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_file = {executor.submit(process_file, filepath): filepath for filepath in md_files}
+            # Submit markdown files
+            for filepath in md_files:
+                all_tasks.append((executor.submit(process_md_file, filepath), filepath))
             
-            for future in as_completed(future_to_file):
+            # Submit PDF files
+            for filepath in pdf_files:
+                all_tasks.append((executor.submit(process_pdf_file, filepath), filepath))
+            
+            for future, filepath in all_tasks:
                 try:
                     result = future.result()
-                    uploaded_docs.append(result)
-                    total_chunks += result["chunks"]
+                    if result:  # PDF processing can return None
+                        uploaded_docs.append(result)
+                        total_chunks += result["chunks"]
+                        print(f"[initialize-dataset] Processed {result['title']}: {result['chunks']} chunks")
                 except Exception as e:
-                    filepath = future_to_file[future]
-                    print(f"Error processing {filepath}: {str(e)}")
+                    print(f"[initialize-dataset] Error processing {filepath}: {str(e)}")
         
-        # Sort results by id for consistent ordering
         uploaded_docs.sort(key=lambda x: x["id"])
         
         return {
@@ -497,13 +702,14 @@ async def generate_suggested_questions(doc: DocumentUpload):
     This endpoint takes the same document data and uses OpenAI to create relevant questions.
     """
     try:
-        def normalize_question(question: str, max_chars: int = 65) -> str:
+        def normalize_question(question: str, max_chars: int = 40) -> str:
             cleaned = question.strip().lstrip("-*0123456789. ").strip()
             if not cleaned:
                 return ""
             if len(cleaned) <= max_chars:
                 return cleaned
-            return cleaned[: max_chars - 1].rstrip() + "…"
+            # If too long, just skip it rather than truncate with ...
+            return ""
 
         request_started_at = time.perf_counter()
         print(
@@ -520,18 +726,28 @@ async def generate_suggested_questions(doc: DocumentUpload):
         if len(content) > max_content_length:
             content = content[:max_content_length] + "...[truncated]"
         
-        # Create a prompt for short, lightweight suggested questions
-        prompt = f"""Generate exactly 3 short suggested questions for this document.
+        # Create a prompt for short, simple questions
+        prompt = f"""Generate 3 SHORT questions about this document.
 
-Requirements:
-- Keep each question simple and easy to read.
-- Maximum 10 words per question.
-- Each question must be clearly about this document.
-- No numbering or bullet points.
-- One question per line.
+CRITICAL: Keep questions under 6 words. Be simple and direct.
 
-Document Title: {doc.document_name}
-Document Content: {content}
+Good examples:
+- What is a pointer?
+- How do arrays work?
+- What does malloc do?
+
+Bad examples (TOO LONG):
+- How can datasets be loaded using torch.utils.data.DataLoader?
+- What is the difference between stack and heap memory allocation?
+
+Rules:
+- MAX 6 words per question
+- Simple vocabulary
+- No numbering
+- One per line
+
+Document: {doc.document_name}
+Content: {content}
 """
 
         openai_started_at = time.perf_counter()
@@ -540,7 +756,7 @@ Document Content: {content}
             messages=[
                 {
                     "role": "system", 
-                    "content": "You create short, friendly question prompts for a chat UI."
+                    "content": "You generate very short, simple questions. Maximum 6 words. Never exceed this limit."
                 },
                 {
                     "role": "user",

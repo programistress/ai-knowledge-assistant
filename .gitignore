@@ -89,6 +89,10 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+# Backend runtime data
+backend/uploads/
+backend/document_metadata.json
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

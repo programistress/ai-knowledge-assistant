@@ -1,6 +1,7 @@
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 import os
+import re
 import time
 from openai import OpenAI
 
@@ -12,18 +13,16 @@ def get_embedding_model():
     if _embedding_model is None:
         print("Loading embedding model (first time only)...")
         try:
-            # Try loading from local cache first (faster, no network)
             _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
             print("Loaded embedding model from local cache")
         except Exception:
-            # Fall back to downloading if not cached
             print("Model not in cache, downloading from HuggingFace...")
             _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
 
+
 def init_pinecone(api_key, index_name="knowledge-base"):
     pc = Pinecone(api_key=api_key)
-    
     # check if index exists, create if not
     if index_name not in pc.list_indexes().names():
         pc.create_index(
@@ -35,18 +34,97 @@ def init_pinecone(api_key, index_name="knowledge-base"):
                 region="us-east-1"
             )
         )
-    
+    # index handle for future operations
     return pc.Index(index_name)
 
-# overlapping chunks with a fixed character count
-def chunk_text(text, chunk_size=2000, overlap=300):
+
+def chunk_text_semantic(text, target_size=1500, max_size=2500, min_size=200):
+    """
+    Semantic chunking: split on paragraph/section boundaries instead of fixed character count.
+    
+    Strategy:
+    1. Split text into paragraphs (double newlines) and sections (headers)
+    2. Merge small paragraphs together until reaching target size
+    3. Split paragraphs that exceed max size at sentence boundaries
+    4. Each chunk maintains semantic coherence
+    """
+    if not text or not text.strip():
+        return []
+    
+    section_pattern = re.compile(r'\n(?=#{1,6}\s|\n)')
+    raw_sections = section_pattern.split(text)
+    
+    paragraphs = []
+    for section in raw_sections:
+        parts = re.split(r'\n\s*\n', section)
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned:
+                paragraphs.append(cleaned)
+    
+    if not paragraphs:
+        return [text.strip()] if text.strip() else []
+    
+    def split_large_paragraph(para, max_len):
+        """Split a large paragraph at sentence boundaries."""
+        if len(para) <= max_len:
+            return [para]
+        
+        sentence_pattern = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+        sentences = sentence_pattern.split(para)
+        
+        if len(sentences) == 1:
+            chunks = []
+            for i in range(0, len(para), max_len):
+                chunks.append(para[i:i + max_len])
+            return chunks
+        
+        result = []
+        current = ""
+        for sentence in sentences:
+            if len(current) + len(sentence) + 1 <= max_len:
+                current = f"{current} {sentence}".strip()
+            else:
+                if current:
+                    result.append(current)
+                current = sentence
+        if current:
+            result.append(current)
+        return result
+    
+    processed = []
+    for para in paragraphs:
+        if len(para) > max_size:
+            processed.extend(split_large_paragraph(para, max_size))
+        else:
+            processed.append(para)
+    
     chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
+    current_chunk = ""
+    
+    for para in processed:
+        potential = f"{current_chunk}\n\n{para}".strip() if current_chunk else para
+        
+        if len(potential) <= target_size:
+            current_chunk = potential
+        elif len(current_chunk) >= min_size:
+            chunks.append(current_chunk)
+            current_chunk = para
+        else:
+            current_chunk = potential
+    
+    if current_chunk:
+        if len(current_chunk) < min_size and chunks:
+            chunks[-1] = f"{chunks[-1]}\n\n{current_chunk}"
+        else:
+            chunks.append(current_chunk)
+    
     return chunks
+
+
+def chunk_text(text, chunk_size=2000, overlap=300):
+    """Legacy fixed-size chunking - kept for compatibility but semantic chunking is preferred."""
+    return chunk_text_semantic(text, target_size=chunk_size, max_size=chunk_size + 500)
 
 def embed_text(chunks):
     model = get_embedding_model()  # Use cached model
@@ -140,7 +218,9 @@ def store_chunks_in_pinecone(
     
     return len(vectors_to_upsert)
 
+
 def query_pinecone(index, query_text, top_k=3):
+    """Simple semantic search using vector similarity."""
     model = get_embedding_model()
     query_embedding = model.encode([query_text], show_progress_bar=False)[0]
     
@@ -150,7 +230,7 @@ def query_pinecone(index, query_text, top_k=3):
         include_metadata=True
     )
     
-    return results['matches']
+    return results.get('matches', [])
 
 # query with a dummy vector to get some results, then extract unique documents
 # this is a workaround since Pinecone doesn't have a "list all" feature
@@ -174,11 +254,15 @@ def get_all_documents(index):
         metadata = match.get('metadata', {})
         doc_id = metadata.get('document_id')
         doc_name = metadata.get('document_name', 'Unknown')
+        file_type = metadata.get('file_type')
+        source_url = metadata.get('source_url')
         
         if doc_id and doc_id not in documents_dict:
             documents_dict[doc_id] = {
                 "document_id": doc_id,
                 "document_name": doc_name,
+                "file_type": file_type,
+                "pdf_url": source_url if file_type == 'pdf' else None
             }
     
     return list(documents_dict.values())

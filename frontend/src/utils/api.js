@@ -1,5 +1,4 @@
-
-const API_URL = process.env.REACT_APP_API_URL
+export const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000'
 
 // helper function to make API requests
 async function apiRequest(endpoint, options = {}) {
@@ -70,7 +69,7 @@ export async function askQuestion(question, topK = 3) {
   });
 }
 
-// get documents from the database
+// get documents info like name, pdf url, id
 export async function getDocuments() {
   return apiRequest('/documents', {
     method: 'GET',
@@ -80,6 +79,13 @@ export async function getDocuments() {
 // delete a document by its ID
 export async function deleteDocument(documentId) {
   return apiRequest(`/documents/${documentId}`, {
+    method: 'DELETE',
+  });
+}
+
+// delete all documents
+export async function clearAllDocuments() {
+  return apiRequest('/documents', {
     method: 'DELETE',
   });
 }

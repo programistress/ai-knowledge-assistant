@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import './App.css';
 import DataUploadPanel from './components/DataUploadPanel';
 import ChatPanel from './components/ChatPanel';
-import { getDocuments, initializeDataset } from './utils/api';
+import { getDocuments } from './utils/api';
 
 function App() {
   const [entries, setEntries] = useState([]);
@@ -23,49 +23,24 @@ function App() {
   const [lastDocumentInfo, setLastDocumentInfo] = useState(null);
 
   useEffect(() => {
-    async function initializeApp() {
+    async function loadDocuments() {
       try {
-        setInitStatus('Checking for existing data...');
-        
-        // Check if data already exists
+        setInitStatus('Loading documents...');
+        // !!! need to change for deployment where its stored
         const existingDocs = await getDocuments();
         
         if (existingDocs.documents && existingDocs.documents.length > 0) {
-          // Data already exists
-          setInitStatus('Loading existing documents...');
           const transformedDocs = existingDocs.documents.map(doc => ({
             id: doc.document_id,
             title: doc.document_name,
+            type: doc.file_type || 'note',
+            pdfUrl: doc.pdf_url || null
           }));
           setEntries(transformedDocs);
-          setInitStatus('Ready!');
-        } else {
-          // No data found - initialize dataset
-          setInitStatus('Initializing DSA dataset (this may take a minute)...');
-          const result = await initializeDataset();
-          
-          setInitStatus(`Loaded ${result.documents_uploaded} documents with ${result.total_chunks} chunks!`);
-          
-          // Fetch the newly uploaded documents
-          const updatedDocs = await getDocuments();
-          const transformedDocs = updatedDocs.documents.map(doc => ({
-            id: doc.document_id,
-            title: doc.document_name,
-          }));
-          setEntries(transformedDocs);
-          
-          // Update welcome message
-          setChatMessages([{
-            id: 1,
-            content: `Dataset initialized successfully! ${result.documents_uploaded} DSA documents are now loaded and ready. Ask me anything about algorithms, data structures, problem-solving patterns, and more!`,
-            sender: 'bot',
-            timestamp: new Date().toLocaleString()
-          }]);
-          
-          setInitStatus('Ready!');
         }
+        setInitStatus('Ready!');
       } catch (error) {
-        console.error('Initialization error:', error);
+        console.error('Load error:', error);
         setInitStatus('Backend unavailable - Please start the backend server');
         setChatMessages([{
           id: 1,
@@ -78,7 +53,7 @@ function App() {
       }
     }
     
-    initializeApp();
+    loadDocuments();
   }, []);
 
   return (

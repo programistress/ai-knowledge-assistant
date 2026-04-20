@@ -1,4 +1,4 @@
-sentence-transformers==5.1.2
+sentence-transformers>=2.2.0
 openai
 pinecone>=5.0.0
 fastapi
@@ -6,3 +6,4 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 pypdf
+rank-bm25

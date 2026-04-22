@@ -1,5 +1,6 @@
 """
-Dataset routes - initialize demo dataset and generate questions.
+initialize dataset from files in dataset directory
+question generation for uploaded document
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ from services.pdf_service import UPLOADS_DIR, pdf_public_url, extract_pdf_pages
 
 router = APIRouter(tags=["dataset"])
 
-
+# validation document upload for question generation
 class DocumentUpload(BaseModel):
     document_id: str
     document_name: str
@@ -27,6 +28,12 @@ class DocumentUpload(BaseModel):
 
 @router.post("/initialize-dataset")
 async def initialize_dataset():
+    """
+    initialize the dataset by uploading the files to pinecone
+    1. find files
+    2. process files md and pdf (get title, store in pinecone)
+    3. use 4 worker threads to process files concurrently
+    """
     index = get_pinecone_index()
 
     try:
@@ -121,9 +128,35 @@ async def initialize_dataset():
         raise HTTPException(status_code=500, detail=f"Error initializing dataset: {str(e)}")
 
 
+def sample_document_content(text: str, total_chars: int = 3000) -> str:
+    """
+    Sample content from beginning, middle, and end of document.
+    This gives broader coverage than just taking the first N characters.
+    """
+    if len(text) <= total_chars:
+        return text
+    
+    chunk_size = total_chars // 3  # ~1000 chars each
+    
+    beginning = text[:chunk_size]
+    
+    middle_start = (len(text) - chunk_size) // 2
+    middle = text[middle_start:middle_start + chunk_size]
+    
+    end = text[-chunk_size:]
+    
+    return f"{beginning}\n\n[...middle section...]\n\n{middle}\n\n[...end section...]\n\n{end}"
+
+
 @router.post("/generate-questions")
 async def generate_suggested_questions(doc: DocumentUpload):
-    """Generate 3 suggested questions based on the uploaded document content."""
+    """
+    generate 3 suggested questions based on the uploaded document content
+    1. sample content from beginning, middle, and end (3000 chars total)
+    2. prompt openai to generate questions
+    3. normalize questions
+    4. return questions
+    """
     request_started_at = time.perf_counter()
 
     try:
@@ -131,11 +164,12 @@ async def generate_suggested_questions(doc: DocumentUpload):
 
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-        content = doc.content[:3000] + "...[truncated]" if len(doc.content) > 3000 else doc.content
+        content = sample_document_content(doc.content, total_chars=3000)
 
         prompt = f"""Generate 3 SHORT questions about this document.
 
 CRITICAL: Keep questions under 6 words. Be simple and direct.
+Cover different topics from the document (not just the beginning).
 
 Good examples:
 - What is a pointer?
@@ -147,9 +181,11 @@ Rules:
 - Simple vocabulary
 - No numbering
 - One per line
+- Questions should cover different parts/topics
 
 Document: {doc.document_name}
-Content: {content}
+Content (sampled from beginning, middle, end):
+{content}
 """
 
         response = client.chat.completions.create(

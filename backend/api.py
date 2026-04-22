@@ -1,5 +1,5 @@
 """
-AI Knowledge Assistant API - Main entry point.
+startup, health checks
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,7 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# register all the routes
 app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(dataset_router)
@@ -62,11 +62,12 @@ async def startup_event():
     print("Embedding model ready!")
 
 
+# is server running check
 @app.get("/")
 async def root():
     return {"message": "AI Knowledge Assistant API is running!", "status": "healthy"}
 
-
+# status check
 @app.get("/health")
 async def health_check():
     return {

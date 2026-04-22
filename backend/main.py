@@ -1,3 +1,10 @@
+"""
+emb model and pinecone init, 
+chunk text semantic, embed chunks, store chunks in pinecone, 
+query pinecone, 
+delete document, 
+generate response
+"""
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 import os
@@ -5,7 +12,6 @@ import re
 import time
 from openai import OpenAI
 
-pinecone_api_key = os.getenv("PINECONE_API_KEY")
 _embedding_model = None
 
 def get_embedding_model():
@@ -40,9 +46,6 @@ def init_pinecone(api_key, index_name="knowledge-base"):
 
 def chunk_text_semantic(text, target_size=1500, max_size=2500, min_size=200):
     """
-    Semantic chunking: split on paragraph/section boundaries instead of fixed character count.
-    
-    Strategy:
     1. Split text into paragraphs (double newlines) and sections (headers)
     2. Merge small paragraphs together until reaching target size
     3. Split paragraphs that exceed max size at sentence boundaries
@@ -123,11 +126,10 @@ def chunk_text_semantic(text, target_size=1500, max_size=2500, min_size=200):
 
 
 def chunk_text(text, chunk_size=2000, overlap=300):
-    """Legacy fixed-size chunking - kept for compatibility but semantic chunking is preferred."""
     return chunk_text_semantic(text, target_size=chunk_size, max_size=chunk_size + 500)
 
 def embed_text(chunks):
-    model = get_embedding_model()  # Use cached model
+    model = get_embedding_model() 
     chunk_embeddings = model.encode(chunks, show_progress_bar=True, batch_size=64)
     return chunk_embeddings
 
@@ -140,6 +142,12 @@ def store_chunks_in_pinecone(
     file_type=None,
     source_url=None
 ):
+    """
+    1. make chunks by page
+    2. embed chunks
+    3. create vectors w id, values, metadata
+    4. upsert vectors to pinecone in batches
+    """
     started_at = time.perf_counter()
 
     chunking_started_at = time.perf_counter()
@@ -172,18 +180,15 @@ def store_chunks_in_pinecone(
 
     vectors_to_upsert = [] 
 
-    # list of tuples (index, (chunk, embedding))
-    # (0, ("The cat sat", [0.2, 0.8, ...])),
     for i, (chunk_record, embedding) in enumerate(zip(chunk_records, embeddings)):
         chunk = chunk_record["content"]
         vector_id = f"{document_id}_chunk_{i}"
         
-        # Metadata stored alongside the vector
         metadata = {
             "document_id": document_id,
             "document_name": document_name,
             "chunk_index": i,
-            "content": chunk  # store the full chunk text
+            "content": chunk  
         }
 
         if chunk_record.get("page_number") is not None:
@@ -220,7 +225,11 @@ def store_chunks_in_pinecone(
 
 
 def query_pinecone(index, query_text, top_k=3):
-    """Simple semantic search using vector similarity."""
+    """
+    convert user's question to a vector
+    queries Pinecone for the top_k most similar chunks
+    return matches
+    """
     model = get_embedding_model()
     query_embedding = model.encode([query_text], show_progress_bar=False)[0]
     
@@ -232,7 +241,7 @@ def query_pinecone(index, query_text, top_k=3):
     
     return results.get('matches', [])
 
-# query with a dummy vector to get some results, then extract unique documents
+
 # this is a workaround since Pinecone doesn't have a "list all" feature
 def get_all_documents(index):
     stats = index.describe_index_stats()
@@ -244,11 +253,10 @@ def get_all_documents(index):
     dummy_query = [0.0] * 384
     results = index.query(
         vector=dummy_query,
-        top_k=min(1000, total_vectors),  #get up to 1000 vectors
+        top_k=min(1000, total_vectors),
         include_metadata=True
     )
     
-    # extract unique documents by document_id
     documents_dict = {}
     for match in results.get('matches', []):
         metadata = match.get('metadata', {})
@@ -268,6 +276,9 @@ def get_all_documents(index):
     return list(documents_dict.values())
 
 def delete_document(index, document_id):
+    """
+    delete all vectors for a given document_id
+    """
     try:
         index.delete(filter={"document_id": {"$eq": document_id}})
         return True
@@ -276,6 +287,10 @@ def delete_document(index, document_id):
         return False
 
 def generate_response(query, context_chunks):
+    """
+    format result chunks into a context string
+    call openai to generate a response
+    """
     chunks_text = []
     for match in context_chunks:
         metadata = match.get('metadata', {})
@@ -286,7 +301,7 @@ def generate_response(query, context_chunks):
     # combine chunks with separator
     context = "\n\n---\n\n".join(chunks_text)
     
-    # Optimized: Reduced context length for faster processing
+    # Reduced context length for faster processing
     max_context_length = 6000
     if len(context) > max_context_length:
         context = context[:max_context_length] + "...[truncated]"
@@ -315,8 +330,8 @@ def generate_response(query, context_chunks):
                     "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
                 }
             ],
-            temperature=0.3,  # Slightly higher for faster generation
-            max_tokens=800  # Increased for better code examples
+            temperature=0.3,  # Low creativity, more factual
+            max_tokens=800  # Max tokens for response
         )
         
         return response.choices[0].message.content

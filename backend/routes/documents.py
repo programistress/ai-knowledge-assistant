@@ -4,12 +4,12 @@ Document management routes - upload, list, delete documents.
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 import time
-import shutil
 
 from state import get_pinecone_index
 from main import store_chunks_in_pinecone, delete_document as delete_from_pinecone
 from document_store import register_document, unregister_document, get_all_documents as get_all_documents_from_store
-from services.pdf_service import pdf_storage_path, pdf_public_url, extract_pdf_pages
+from services.pdf_service import extract_pdf_pages_from_bytes
+from services.r2_service import upload_pdf_from_bytes, delete_pdf
 
 router = APIRouter(tags=["documents"])
 
@@ -70,18 +70,21 @@ async def upload_pdf_document(
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     request_started_at = time.perf_counter()
-    stored_file_path = pdf_storage_path(document_id)
 
     try:
-        with stored_file_path.open("wb") as output_file:
-            shutil.copyfileobj(file.file, output_file)
+        # Read into memory (no temp files)
+        file_bytes = await file.read()
 
-        page_texts, full_text = extract_pdf_pages(stored_file_path)
+        page_texts, full_text = extract_pdf_pages_from_bytes(file_bytes)
         if not full_text.strip():
             raise HTTPException(
                 status_code=400,
                 detail="Sorry, we can't read text from your PDF :( It might be a scanned document or image-based."
             )
+
+        # Upload bytes directly to R2
+        r2_url = upload_pdf_from_bytes(document_id, file_bytes)
+        print(f"[upload-pdf] uploaded to R2: {r2_url}")
 
         num_chunks = store_chunks_in_pinecone(
             index=index,
@@ -90,14 +93,14 @@ async def upload_pdf_document(
             document_name=document_name,
             page_texts=page_texts,
             file_type="pdf",
-            source_url=pdf_public_url(document_id)
+            source_url=r2_url
         )
 
         register_document(
             document_id=document_id,
             document_name=document_name,
             file_type="pdf",
-            pdf_url=pdf_public_url(document_id),
+            pdf_url=r2_url,
             num_chunks=num_chunks
         )
 
@@ -110,7 +113,7 @@ async def upload_pdf_document(
             "document_id": document_id,
             "document_name": document_name,
             "num_chunks": num_chunks,
-            "pdf_url": pdf_public_url(document_id),
+            "pdf_url": r2_url,
             "content": full_text
         }
     except HTTPException:
@@ -119,8 +122,6 @@ async def upload_pdf_document(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
-    finally:
-        file.file.close()
 
 
 @router.get("/documents")
@@ -144,9 +145,8 @@ async def delete_document_endpoint(document_id: str):
         pinecone_success = delete_from_pinecone(index, document_id)
         unregister_document(document_id)
 
-        pdf_path = pdf_storage_path(document_id)
-        if pdf_path.exists():
-            pdf_path.unlink()
+        # Delete from R2
+        delete_pdf(document_id)
 
         if pinecone_success:
             return {"success": True, "message": f"Document {document_id} deleted successfully"}
@@ -173,9 +173,8 @@ async def clear_all_documents():
                 delete_from_pinecone(index, doc_id)
                 unregister_document(doc_id)
 
-                pdf_path = pdf_storage_path(doc_id)
-                if pdf_path.exists():
-                    pdf_path.unlink()
+                # Delete from R2
+                delete_pdf(doc_id)
 
                 deleted_count += 1
 

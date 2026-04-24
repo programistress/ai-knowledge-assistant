@@ -3,14 +3,12 @@ startup, health checks
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from main import init_pinecone, get_embedding_model
-from services.pdf_service import UPLOADS_DIR
 import state
 
 # Import routers
@@ -25,8 +23,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Static file server for PDFs
-app.mount("/files", StaticFiles(directory=str(UPLOADS_DIR)), name="files")
+# PDFs are now served from Cloudflare R2 (no local static files needed)
 
 # CORS middleware
 app.add_middleware(

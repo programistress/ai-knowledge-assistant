@@ -1,23 +1,10 @@
 """
-PDF processing service - handles PDF extraction, storage paths, and text cleaning.
+PDF processing service - handles PDF text extraction only.
 """
 import re
+from io import BytesIO
 from pathlib import Path
 from pypdf import PdfReader
-
-# PDF storage directory - configured at module level
-UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def pdf_storage_path(document_id: str) -> Path:
-    """Get the file system path for storing a PDF."""
-    return UPLOADS_DIR / f"{document_id}.pdf"
-
-
-def pdf_public_url(document_id: str) -> str:
-    """Get the public URL for accessing a stored PDF."""
-    return f"/files/{document_id}.pdf"
 
 
 def fix_pdf_spacing(text: str) -> str:
@@ -31,21 +18,12 @@ def fix_pdf_spacing(text: str) -> str:
     return text
 
 
-def extract_pdf_pages(file_path: Path) -> tuple[list[tuple[int, str]], str]:
-    """
-    Extract text from a PDF file, page by page.
-    
-    Returns:
-        tuple: (page_texts, full_text)
-            - page_texts: List of (page_number, text) tuples
-            - full_text: Combined text from all pages
-    """
-    reader = PdfReader(str(file_path))
+def _extract_pages_from_reader(reader: PdfReader) -> tuple[list[tuple[int, str]], str]:
+    """Internal helper to extract text from a PdfReader instance."""
     page_texts = []
     full_text_parts = []
 
     for page_index, page in enumerate(reader.pages):
-        # Try layout mode first for better spacing
         try:
             text = (page.extract_text(extraction_mode="layout") or "").strip()
         except Exception:
@@ -61,3 +39,15 @@ def extract_pdf_pages(file_path: Path) -> tuple[list[tuple[int, str]], str]:
 
     full_text = "\n\n".join(full_text_parts)
     return page_texts, full_text
+
+
+def extract_pdf_pages(file_path: Path) -> tuple[list[tuple[int, str]], str]:
+    """Extract text from a PDF file path (for dataset initialization)."""
+    reader = PdfReader(str(file_path))
+    return _extract_pages_from_reader(reader)
+
+
+def extract_pdf_pages_from_bytes(file_bytes: bytes) -> tuple[list[tuple[int, str]], str]:
+    """Extract text from PDF bytes (for user uploads - no disk I/O)."""
+    reader = PdfReader(BytesIO(file_bytes))
+    return _extract_pages_from_reader(reader)

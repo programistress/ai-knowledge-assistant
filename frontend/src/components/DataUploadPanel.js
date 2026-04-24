@@ -156,7 +156,10 @@ function DataUploadPanel({
 
   const handleEntryClick = (entry) => {
     if (entry.pdfUrl) {
-      const fullUrl = `${API_URL}${entry.pdfUrl}`;
+      // R2 URLs are full URLs, local URLs need API_URL prefix
+      const fullUrl = entry.pdfUrl.startsWith('http') 
+        ? entry.pdfUrl 
+        : `${API_URL}${entry.pdfUrl}`;
       window.open(fullUrl, '_blank');
     }
   };

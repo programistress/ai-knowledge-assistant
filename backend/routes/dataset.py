@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import os
 import glob
-import shutil
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -14,8 +13,9 @@ from openai import OpenAI
 
 from state import get_pinecone_index
 from main import store_chunks_in_pinecone
-from document_store import register_document
-from services.pdf_service import UPLOADS_DIR, pdf_public_url, extract_pdf_pages
+from document_store import register_document, document_exists
+from services.pdf_service import extract_pdf_pages
+from services.r2_service import upload_pdf, pdf_exists as r2_pdf_exists, get_pdf_url
 
 router = APIRouter(tags=["dataset"])
 
@@ -50,13 +50,19 @@ async def initialize_dataset():
         pdf_files.sort()
 
         def process_md_file(filepath):
+            doc_id = os.path.basename(filepath).replace('.md', '')
+
+            # Skip if already processed
+            if document_exists(doc_id):
+                print(f"[initialize-dataset] Skipping {doc_id}.md - already exists")
+                return {"id": doc_id, "title": doc_id, "chunks": 0, "type": "md", "skipped": True}
+
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             lines = content.split('\n')
             title_line = next((line for line in lines if line.strip().startswith('#')), None)
-            title = title_line.replace('#', '').strip() if title_line else os.path.basename(filepath).replace('.md', '')
-            doc_id = os.path.basename(filepath).replace('.md', '')
+            title = title_line.replace('#', '').strip() if title_line else doc_id
 
             num_chunks = store_chunks_in_pinecone(index=index, text=content, document_id=doc_id, document_name=title)
             register_document(document_id=doc_id, document_name=title, file_type="md", num_chunks=num_chunks)
@@ -67,14 +73,21 @@ async def initialize_dataset():
             filename = os.path.basename(filepath)
             doc_id = f"demo_{filename.replace('.pdf', '').replace(' ', '_').lower()}"
 
-            dest_path = UPLOADS_DIR / f"{doc_id}.pdf"
-            shutil.copy2(filepath, dest_path)
+            # Skip if already processed (exists in both document store and R2)
+            if document_exists(doc_id) and r2_pdf_exists(doc_id):
+                r2_url = get_pdf_url(doc_id)
+                print(f"[initialize-dataset] Skipping {filename} - already exists in R2")
+                return {"id": doc_id, "title": filename, "chunks": 0, "type": "pdf", "pdf_url": r2_url, "skipped": True}
 
             page_texts, full_text = extract_pdf_pages(Path(filepath))
 
             if not full_text.strip():
                 print(f"[initialize-dataset] Skipping {filename} - no extractable text")
                 return None
+
+            # Upload to R2
+            r2_url = upload_pdf(doc_id, Path(filepath))
+            print(f"[initialize-dataset] uploaded to R2: {r2_url}")
 
             num_chunks = store_chunks_in_pinecone(
                 index=index,
@@ -83,21 +96,22 @@ async def initialize_dataset():
                 document_name=filename,
                 page_texts=page_texts,
                 file_type="pdf",
-                source_url=pdf_public_url(doc_id)
+                source_url=r2_url
             )
 
             register_document(
                 document_id=doc_id,
                 document_name=filename,
                 file_type="pdf",
-                pdf_url=pdf_public_url(doc_id),
+                pdf_url=r2_url,
                 num_chunks=num_chunks
             )
 
-            return {"id": doc_id, "title": filename, "chunks": num_chunks, "type": "pdf", "pdf_url": pdf_public_url(doc_id)}
+            return {"id": doc_id, "title": filename, "chunks": num_chunks, "type": "pdf", "pdf_url": r2_url}
 
-        uploaded_docs = []
+        processed_docs = []
         total_chunks = 0
+        skipped_count = 0
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             all_tasks = [(executor.submit(process_md_file, f), f) for f in md_files]
@@ -107,20 +121,25 @@ async def initialize_dataset():
                 try:
                     result = future.result()
                     if result:
-                        uploaded_docs.append(result)
-                        total_chunks += result["chunks"]
-                        print(f"[initialize-dataset] Processed {result['title']}: {result['chunks']} chunks")
+                        processed_docs.append(result)
+                        if result.get("skipped"):
+                            skipped_count += 1
+                        else:
+                            total_chunks += result["chunks"]
+                            print(f"[initialize-dataset] Processed {result['title']}: {result['chunks']} chunks")
                 except Exception as e:
                     print(f"[initialize-dataset] Error processing {filepath}: {str(e)}")
 
-        uploaded_docs.sort(key=lambda x: x["id"])
+        processed_docs.sort(key=lambda x: x["id"])
+        new_uploads = len(processed_docs) - skipped_count
 
         return {
             "success": True,
-            "message": "Dataset initialized successfully",
-            "documents_uploaded": len(uploaded_docs),
+            "message": f"Dataset initialized: {new_uploads} new, {skipped_count} skipped (already exist)",
+            "documents_uploaded": new_uploads,
+            "documents_skipped": skipped_count,
             "total_chunks": total_chunks,
-            "documents": uploaded_docs
+            "documents": processed_docs
         }
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))

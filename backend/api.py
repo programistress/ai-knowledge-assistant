@@ -26,6 +26,7 @@ app = FastAPI(
 # CORS middleware - allow frontend origins from env or defaults
 FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 origins = [origin.strip() for origin in FRONTEND_ORIGINS.split(",")]
+print(f"CORS origins configured: {origins}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,5 +72,6 @@ async def health_check():
     return {
         "status": "healthy",
         "pinecone_configured": state.pinecone_index is not None,
-        "openai_configured": os.getenv("OPENAI_API_KEY") is not None
+        "openai_configured": os.getenv("OPENAI_API_KEY") is not None,
+        "cors_origins": origins
     }

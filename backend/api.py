@@ -1,12 +1,15 @@
 """
 startup, health checks
 """
+print("=== Loading API module ===", flush=True)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+print("Environment loaded", flush=True)
 
 from main import init_pinecone, get_embedding_model
 import state
@@ -45,20 +48,33 @@ app.include_router(dataset_router)
 @app.on_event("startup")
 async def startup_event():
     """Initialize Pinecone and pre-load the embedding model."""
-    api_key = os.getenv("PINECONE_API_KEY")
-    print("Initializing Pinecone connection...")
-    index = init_pinecone(api_key, index_name="knowledge-base")
-    state.set_pinecone_index(index)
-    print("Pinecone ready!")
+    print("=== Starting AI Knowledge Assistant API ===", flush=True)
+    
+    try:
+        api_key = os.getenv("PINECONE_API_KEY")
+        if not api_key:
+            print("ERROR: PINECONE_API_KEY not found!", flush=True)
+        else:
+            print("Initializing Pinecone connection...", flush=True)
+            index = init_pinecone(api_key, index_name="knowledge-base")
+            state.set_pinecone_index(index)
+            print("Pinecone ready!", flush=True)
+    except Exception as e:
+        print(f"ERROR initializing Pinecone: {e}", flush=True)
 
     if not os.getenv("OPENAI_API_KEY"):
-        print("Warning: OpenAI key not found")
+        print("Warning: OpenAI key not found", flush=True)
     else:
-        print("OpenAI API key found!")
+        print("OpenAI API key found!", flush=True)
 
-    print("Pre-loading embedding model...")
-    get_embedding_model()
-    print("Embedding model ready!")
+    try:
+        print("Pre-loading embedding model (this may take a minute)...", flush=True)
+        get_embedding_model()
+        print("Embedding model ready!", flush=True)
+    except Exception as e:
+        print(f"ERROR loading embedding model: {e}", flush=True)
+    
+    print("=== Startup complete ===", flush=True)
 
 
 # is server running check

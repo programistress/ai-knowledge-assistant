@@ -23,12 +23,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# PDFs are now served from Cloudflare R2 (no local static files needed)
+# CORS middleware - allow frontend origins from env or defaults
+FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+origins = [origin.strip() for origin in FRONTEND_ORIGINS.split(",")]
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
